@@ -64,7 +64,7 @@ def dividend_yield(ticker, S):
     tk = yf.Ticker(ticker)
     q = tk.info.get("dividendYield")
     if q is not None:
-        return q / 100
+        return q / 10000  # yfinance gives it in percentage
     divs = tk.dividends
     if divs.empty or S <= 0:
         return 0.0
