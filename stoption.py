@@ -12,7 +12,6 @@ import plotly.graph_objects as go
 st.set_page_config(layout="wide", page_title="Options Analytics Dashboard")
 st.title("Options Analytics Dashboard")
 
-# --- Black-Scholes forward price
 def bs_forward_price(F, K, T, r, sigma, opt_type):
     d1 = (np.log(F / K) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
@@ -21,7 +20,6 @@ def bs_forward_price(F, K, T, r, sigma, opt_type):
         return df * (F * norm.cdf(d1) - K * norm.cdf(d2))
     return df * (K * norm.cdf(-d2) - F * norm.cdf(-d1))
 
-# --- Implied volatility
 def implied_vol(price, F, K, T, r, opt_type):
     if price <= 0 or T <= 0:
         return np.nan
@@ -31,7 +29,6 @@ def implied_vol(price, F, K, T, r, opt_type):
     except:
         return np.nan
 
-# --- Greeks calculation
 def greeks(F, S, K, T, r, q, sigma, opt_type):
     if T <= 0 or sigma <= 0:
         return pd.Series([np.nan]*5)
@@ -48,7 +45,6 @@ def greeks(F, S, K, T, r, q, sigma, opt_type):
     rho   = K*T*df_r*norm.cdf(d2 if call else -d2)
     return pd.Series([delta, gamma, vega, theta, rho])
 
-# --- Load option chain
 @st.cache_data
 def load_option_chain(ticker):
     tk = yf.Ticker(ticker)
@@ -63,7 +59,6 @@ def load_option_chain(ticker):
             chains.append(d)
     return spot, pd.concat(chains, ignore_index=True) if chains else pd.DataFrame()
 
-# --- Dividend yield
 @st.cache_data
 def dividend_yield(ticker, S):
     tk = yf.Ticker(ticker)
@@ -76,7 +71,6 @@ def dividend_yield(ticker, S):
     one_year_ago = pd.Timestamp.utcnow() - pd.DateOffset(years=1)
     return divs[divs.index >= one_year_ago].sum() / S
 
-# --- Sidebar
 st.sidebar.header("Market")
 ticker = st.sidebar.text_input("Ticker", "AAPL")
 r = st.sidebar.number_input("Risk-free rate", 0.0, 0.1, 0.04)
@@ -85,7 +79,6 @@ st.sidebar.header("Filters")
 min_oi = st.sidebar.number_input("Min Open Interest", 0, 100000, 100)
 min_vol = st.sidebar.number_input("Min Volume", 0, 100000, 10)
 
-# --- Main computation
 if ticker:
     S, df = load_option_chain(ticker)
     if df.empty:
@@ -107,14 +100,12 @@ if ticker:
 
         tab1, tab2, tab3 = st.tabs(["Option Chain", "Greeks", "Volatility Surface"])
 
-        # --- Option chain
         with tab1:
             st.dataframe(
                 df[["type","strike","expiration","mid","iv"] + greek_cols + ["openInterest","volume"]]
                 .sort_values(["expiration","strike"])
             )
 
-        # --- Greeks charts for selected expiration
         with tab2:
             exp = st.selectbox("Choose Expiration", sorted(df["expiration"].unique()))
             d = df[df["expiration"] == exp]
@@ -126,7 +117,6 @@ if ticker:
                     use_container_width=True
                 )
 
-        # --- Volatility surface
         with tab3:
             st.subheader("Implied Volatility Surface")
             surface_df = df[["strike","T","iv"]]
