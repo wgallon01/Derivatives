@@ -45,6 +45,16 @@ def greeks(F, S, K, T, r, q, sigma, opt_type):
     rho   = K*T*df_r*norm.cdf(d2 if call else -d2)
     return pd.Series([delta, gamma, vega, theta, rho])
 
+def callspread_price(F, K1, K2, T, r, sigma):
+    c1 = bs_forward_price(F, K1, T, r, sigma, "call")
+    c2 = bs_forward_price(F, K2, T, r, sigma, "call")
+    return c1 - c2
+
+def putspread(F, K1, K2, T, r, sigma):
+    p1 = bs_forward_price(F, K1, T, r, sigma, "put")
+    p2 = bs_forward_price(F, K2, T, r, sigma, "put")
+    return p1 - p2
+
 @st.cache_data
 def load_option_chain(ticker):
     tk = yf.Ticker(ticker)
@@ -64,7 +74,7 @@ def dividend_yield(ticker, S):
     tk = yf.Ticker(ticker)
     q = tk.info.get("dividendYield")
     if q is not None:
-        return q / 10000  # yfinance gives it in percentage
+        return q / 100  # yfinance gives it in percentage
     divs = tk.dividends
     if divs.empty or S <= 0:
         return 0.0
@@ -76,8 +86,8 @@ ticker = st.sidebar.text_input("Ticker", "AAPL")
 r = st.sidebar.number_input("Risk-free rate", 0.0, 0.1, 0.04)
 
 st.sidebar.header("Filters")
-min_oi = st.sidebar.number_input("Min Open Interest", 0, 100000, 100)
-min_vol = st.sidebar.number_input("Min Volume", 0, 100000, 10)
+min_oi = st.sidebar.number_input("Min Open Interest", 0, 100000, 1)
+min_vol = st.sidebar.number_input("Min Volume", 0, 100000, 1)
 
 if ticker:
     S, df = load_option_chain(ticker)
@@ -98,7 +108,7 @@ if ticker:
 
         st.subheader(f"{ticker} | Spot {S:.2f} | q {q:.2%} | r {r:.2%}")
 
-        tab1, tab2, tab3 = st.tabs(["Option Chain", "Greeks", "Volatility Surface"])
+        tab1, tab2, tab3, tab4 = st.tabs(["Option Chain", "Greeks", "Volatility Surface", "Trade analysis"])
 
         with tab1:
             st.dataframe(
@@ -107,15 +117,19 @@ if ticker:
             )
 
         with tab2:
-            exp = st.selectbox("Choose Expiration", sorted(df["expiration"].unique()))
-            d = df[df["expiration"] == exp]
-
             for g in greek_cols:
-                st.plotly_chart(
-                    px.scatter(d, x="strike", y=g, color="type", title=f"{g.capitalize()} vs Strike for {exp.date()}",
-                               labels={"strike":"Strike", g:g.capitalize(), "type":"Option Type"}),
-                    use_container_width=True
+                fig = px.scatter(
+                    df,
+                    x="strike",
+                    y=g,
+                    color="type",              # Call/Put
+                    symbol="expiration",        # Different symbols for each expiration
+                    labels={"strike":"Strike", g:g.capitalize(), "type":"Option Type", "expiration":"Expiration"},
+                    title=f"{g.capitalize()} vs Strike for All Expirations",
+                    hover_data=["expiration","T","iv","mid"]
                 )
+                st.plotly_chart(fig, use_container_width=True)
+
 
         with tab3:
             st.subheader("Implied Volatility Surface")
@@ -134,5 +148,27 @@ if ticker:
                                          yaxis_title="Strike",
                                          zaxis_title="Implied Volatility"))
             st.plotly_chart(fig, use_container_width=True)
+        with tab4:
+            st.subheader("Trade Analysis")
+            col1, col2 = st.columns(2)
+            with col1:
+                opt_type = st.selectbox("Option Type", ["call spread", "put spread"])
+                K1 = st.number_input("Strike 1", value=float(S))
+                K2 = st.number_input("Strike 2", value=float(S + 10))
+                exp_trade = st.date_input("Expiration Date", value=today + pd.DateOffset(days=30))
+                T_trade = (pd.to_datetime(exp_trade) - today).days / 365
+                sigma_trade = st.number_input("Implied Volatility", min_value=0.01, max_value=3.0, value=0.2, step=0.01)
+            with col2:
+                if opt_type == "call spread":
+                    price = callspread_price(S * np.exp((r - q) * T_trade), K1, K2, T_trade, r, sigma_trade)
+                else:
+                    price = putspread(S * np.exp((r - q) * T_trade), K1, K2, T_trade, r, sigma_trade)
+                st.markdown(f"### Spread Price: {price:.2f}")
+                greeks_trade = greeks(S * np.exp((r - q) * T_trade), S, (K1 + K2) / 2, T_trade, r, q, sigma_trade, opt_type)
+                greek_names = ["Delta", "Gamma", "Vega", "Theta", "Rho"]
+                for name, val in zip(greek_names, greeks_trade):
+                    st.markdown(f"**{name}:** {val:.4f}")
+
+
 
 
