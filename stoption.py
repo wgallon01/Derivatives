@@ -1,174 +1,118 @@
-import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from scipy.stats import norm
-from scipy.optimize import brentq
-from scipy.interpolate import griddata
-import plotly.express as px
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 
-st.set_page_config(layout="wide", page_title="Options Analytics Dashboard")
-st.title("Options Analytics Dashboard")
+r = 0.03
+q = 0.0
 
-def bs_forward_price(F, K, T, r, sigma, opt_type):
-    d1 = (np.log(F / K) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    df = np.exp(-r * T)
-    if opt_type == "call":
-        return df * (F * norm.cdf(d1) - K * norm.cdf(d2))
-    return df * (K * norm.cdf(-d2) - F * norm.cdf(-d1))
-
-def implied_vol(price, F, K, T, r, opt_type):
-    if price <= 0 or T <= 0:
-        return np.nan
-    try:
-        f = lambda s: bs_forward_price(F, K, T, r, s, opt_type) - price
-        return brentq(f, 1e-6, 5.0)
-    except:
-        return np.nan
-
-def greeks(F, S, K, T, r, q, sigma, opt_type):
+def bs_price(S, K, T, sigma, opt_type, r):
     if T <= 0 or sigma <= 0:
-        return pd.Series([np.nan]*5)
-    d1 = (np.log(F / K) + 0.5*sigma**2*T)/(sigma*np.sqrt(T))
+        return max(0, (S-K) if opt_type=="call" else (K-S))
+    d1 = (np.log(S/K) + (r-q + 0.5*sigma**2)*T)/(sigma*np.sqrt(T))
     d2 = d1 - sigma*np.sqrt(T)
-    df_r = np.exp(-r*T)
-    df_q = np.exp(-q*T)
+    df = np.exp(-r*T)
+    return df*(S*np.exp((r-q)*T)*norm.cdf(d1) - K*norm.cdf(d2)) if opt_type=="call" else df*(K*norm.cdf(-d2) - S*np.exp((r-q)*T)*norm.cdf(-d1))
+
+def greeks(S, K, T, sigma, opt_type, r, q):
+    if T <= 0 or sigma <= 0:
+        return pd.Series([np.nan]*3,index=["delta","gamma","vega"])
+    d1 = (np.log(S/K) + (r-q+0.5*sigma**2)*T)/(sigma*np.sqrt(T))
     pdf = norm.pdf(d1)
-    call = opt_type == "call"
-    delta = df_q*(norm.cdf(d1) if call else -norm.cdf(-d1))
+    call = opt_type=="call"
+    df_q = np.exp(-q*T)
+    delta = df_q*(norm.cdf(d1) if call else norm.cdf(d1)-1)
     gamma = df_q*pdf/(S*sigma*np.sqrt(T))
-    vega  = df_q*S*pdf*np.sqrt(T)
-    theta = -df_q*S*pdf*sigma/(2*np.sqrt(T)) - r*K*df_r*norm.cdf(d2 if call else -d2) + q*S*norm.cdf(d1 if call else -1)
-    rho   = K*T*df_r*norm.cdf(d2 if call else -d2)
-    return pd.Series([delta, gamma, vega, theta, rho])
+    vega  = S*df_q*pdf*np.sqrt(T)
+    return pd.Series([delta,gamma,vega],index=["delta","gamma","vega"])
 
-def callspread_price(F, K1, K2, T, r, sigma):
-    c1 = bs_forward_price(F, K1, T, r, sigma, "call")
-    c2 = bs_forward_price(F, K2, T, r, sigma, "call")
-    return c1 - c2
+# Paramètres du backtest
+ticker = "AAPL"
+data = yf.download(ticker, start="2020-01-01", end="2026-01-01")["Close"].copy()
+data = data.astype(float)
 
-def putspread(F, K1, K2, T, r, sigma):
-    p1 = bs_forward_price(F, K1, T, r, sigma, "put")
-    p2 = bs_forward_price(F, K2, T, r, sigma, "put")
-    return p1 - p2
+rolling_days = 21  #Rolling
+sigma = 0.20
+spread_width = 10
+results = []
 
-@st.cache_data
-def load_option_chain(ticker):
-    tk = yf.Ticker(ticker)
-    spot = tk.history(period="1d")["Close"].iloc[-1]
-    chains = []
-    for exp in tk.options:
-        oc = tk.option_chain(exp)
-        for df, t in [(oc.calls, "call"), (oc.puts, "put")]:
-            d = df.copy()
-            d["type"] = t
-            d["expiration"] = pd.to_datetime(exp)
-            chains.append(d)
-    return spot, pd.concat(chains, ignore_index=True) if chains else pd.DataFrame()
+for start_idx in range(0, len(data), rolling_days):
+    start_date = data.index[start_idx]
+    if start_idx + rolling_days >= len(data):
+        break
+    end_date = data.index[start_idx + rolling_days]
 
-@st.cache_data
-def dividend_yield(ticker, S):
-    tk = yf.Ticker(ticker)
-    q = tk.info.get("dividendYield")
-    if q is not None:
-        return q / 100  # yfinance gives it in percentage
-    divs = tk.dividends
-    if divs.empty or S <= 0:
-        return 0.0
-    one_year_ago = pd.Timestamp.utcnow() - pd.DateOffset(years=1)
-    return divs[divs.index >= one_year_ago].sum() / S
+    S0 = float(data.loc[start_date])
+    ST = float(data.loc[end_date])
 
-st.sidebar.header("Market")
-ticker = st.sidebar.text_input("Ticker", "AAPL")
-r = st.sidebar.number_input("Risk-free rate", 0.0, 0.1, 0.04)
+    K1 = S0
+    K2 = S0 + spread_width
 
-st.sidebar.header("Filters")
-min_oi = st.sidebar.number_input("Min Open Interest", 0, 100000, 1)
-min_vol = st.sidebar.number_input("Min Volume", 0, 100000, 1)
+    call_long = bs_price(S0, K1, rolling_days/252, sigma, "call", r)
+    call_short = bs_price(S0, K2, rolling_days/252, sigma, "call", r)
+    net_premium = call_long - call_short
 
-if ticker:
-    S, df = load_option_chain(ticker)
-    if df.empty:
-        st.warning("No options data found.")
-    else:
-        q = dividend_yield(ticker, S)
-        today = datetime.utcnow()
-        df["T"] = (df["expiration"] - today).dt.days / 365
-        df = df[(df["T"] > 0) & (df["openInterest"] >= min_oi) & (df["volume"] >= min_vol)]
-        df["mid"] = (df["bid"] + df["ask"]) / 2
-        df = df[df["mid"] > 0]
-        df["F"] = S * np.exp((r - q) * df["T"])
-        df["iv"] = df.apply(lambda x: implied_vol(x["mid"], x["F"], x["strike"], x["T"], r, x["type"]), axis=1)
-        greek_cols = ["delta","gamma","vega","theta","rho"]
-        df[greek_cols] = df.apply(lambda x: greeks(x["F"], S, x["strike"], x["T"], r, q, x["iv"], x["type"]), axis=1)
-        df = df.dropna(subset=["iv"])
+    payoff_long = max(ST-K1,0)
+    payoff_short = max(ST-K2,0)
+    pnl = (payoff_long - payoff_short) - net_premium
 
-        st.subheader(f"{ticker} | Spot {S:.2f} | q {q:.2%} | r {r:.2%}")
+    g_long = greeks(S0, K1, rolling_days/252, sigma, "call", r, q)
+    g_short = greeks(S0, K2, rolling_days/252, sigma, "call", r, q)
 
-        tab1, tab2, tab3, tab4 = st.tabs(["Option Chain", "Greeks", "Volatility Surface", "Trade analysis"])
+    results.append({
+        "start": start_date,
+        "end": end_date,
+        "S0": S0,
+        "ST": ST,
+        "K1": K1,
+        "K2": K2,
+        "premium": net_premium,
+        "PnL": pnl,
+        "Delta": g_long["delta"] - g_short["delta"],
+        "Gamma": g_long["gamma"] - g_short["gamma"],
+        "Vega": g_long["vega"] - g_short["vega"]
+    })
 
-        with tab1:
-            st.dataframe(
-                df[["type","strike","expiration","mid","iv"] + greek_cols + ["openInterest","volume"]]
-                .sort_values(["expiration","strike"])
-            )
+df_results = pd.DataFrame(results)
 
-        with tab2:
-            for g in greek_cols:
-                fig = px.scatter(
-                    df,
-                    x="strike",
-                    y=g,
-                    color="type",              # Call/Put
-                    symbol="expiration",        # Different symbols for each expiration
-                    labels={"strike":"Strike", g:g.capitalize(), "type":"Option Type", "expiration":"Expiration"},
-                    title=f"{g.capitalize()} vs Strike for All Expirations",
-                    hover_data=["expiration","T","iv","mid"]
-                )
-                st.plotly_chart(fig, use_container_width=True)
+if not df_results.empty:
+    df_results["PnL_cum"] = df_results["PnL"].cumsum()
+    print(df_results)
 
+    plt.figure(figsize=(12,6))
+    plt.plot(df_results["end"], df_results["PnL_cum"], marker='o')
+    plt.xlabel("Expiration")
+    plt.ylabel("Cumulative PnL")
+    plt.title("Rolling ATM Call Spread Backtest (2022)")
+    plt.grid(True)
+    plt.show()
 
-        with tab3:
-            st.subheader("Implied Volatility Surface")
-            surface_df = df[["strike","T","iv"]]
-            strikes = np.linspace(surface_df["strike"].min(), surface_df["strike"].max(), 50)
-            maturities = np.linspace(surface_df["T"].min(), surface_df["T"].max(), 50)
-            grid_K, grid_T = np.meshgrid(strikes, maturities)
-            grid_iv = griddata(points=(surface_df["strike"], surface_df["T"]),
-                               values=surface_df["iv"],
-                               xi=(grid_K, grid_T),
-                               method="cubic")
-            fig = go.Figure(
-                data=[go.Surface(x=grid_T, y=grid_K, z=grid_iv, colorscale="Viridis")]
-            )
-            fig.update_layout(scene=dict(xaxis_title="Time to Maturity",
-                                         yaxis_title="Strike",
-                                         zaxis_title="Implied Volatility"))
-            st.plotly_chart(fig, use_container_width=True)
-        with tab4:
-            st.subheader("Trade Analysis")
-            col1, col2 = st.columns(2)
-            with col1:
-                opt_type = st.selectbox("Option Type", ["call spread", "put spread"])
-                K1 = st.number_input("Strike 1", value=float(S))
-                K2 = st.number_input("Strike 2", value=float(S + 10))
-                exp_trade = st.date_input("Expiration Date", value=today + pd.DateOffset(days=30))
-                T_trade = (pd.to_datetime(exp_trade) - today).days / 365
-                sigma_trade = st.number_input("Implied Volatility", min_value=0.01, max_value=3.0, value=0.2, step=0.01)
-            with col2:
-                if opt_type == "call spread":
-                    price = callspread_price(S * np.exp((r - q) * T_trade), K1, K2, T_trade, r, sigma_trade)
-                else:
-                    price = putspread(S * np.exp((r - q) * T_trade), K1, K2, T_trade, r, sigma_trade)
-                st.markdown(f"### Spread Price: {price:.2f}")
-                greeks_trade = greeks(S * np.exp((r - q) * T_trade), S, (K1 + K2) / 2, T_trade, r, q, sigma_trade, opt_type)
-                greek_names = ["Delta", "Gamma", "Vega", "Theta", "Rho"]
-                for name, val in zip(greek_names, greeks_trade):
-                    st.markdown(f"**{name}:** {val:.4f}")
+    plt.figure(figsize=(12,6))
+    plt.plot(df_results["end"], df_results["Delta"], label="Delta")
+    plt.xlabel("Expiration")
+    plt.ylabel("Value")
+    plt.title("Delta Evolution for Rolling ATM Call Spread (2022)")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
+    plt.figure(figsize=(12,6))
+    plt.plot(df_results["end"], df_results["Gamma"], label="Gamma")
+    plt.xlabel("Expiration")
+    plt.ylabel("Value")
+    plt.title("Gamma Evolution for Rolling ATM Call Spread (2022)")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
-
-
+    plt.figure(figsize=(12,6))
+    plt.plot(df_results["end"], df_results["Vega"], label="Vega")
+    plt.xlabel("Expiration")
+    plt.ylabel("Value")
+    plt.title("Vega Evolution for Rolling ATM Call Spread (2022)")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+else:
+    print("Aucun trade généré.")
