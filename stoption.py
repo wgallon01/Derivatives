@@ -96,7 +96,6 @@ if not df_results.empty:
     plt.legend()
     plt.grid(True)
     plt.show()
-
     plt.figure(figsize=(12,6))
     plt.plot(df_results["end"], df_results["Gamma"], label="Gamma")
     plt.xlabel("Expiration")
