@@ -27,12 +27,11 @@ def greeks(S, K, T, sigma, opt_type, r, q):
     vega  = S*df_q*pdf*np.sqrt(T)
     return pd.Series([delta,gamma,vega],index=["delta","gamma","vega"])
 
-# Paramètres du backtest
 ticker = "AAPL"
 data = yf.download(ticker, start="2020-01-01", end="2026-01-01")["Close"].copy()
 data = data.astype(float)
 
-rolling_days = 21  #Rolling
+rolling_days = 21  
 sigma = 0.20
 spread_width = 10
 results = []
